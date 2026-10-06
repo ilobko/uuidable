@@ -66,6 +66,29 @@ Uuidable.default_storage = :text
 
 Columns compared in SQL, for example in a join, must use the same storage: a 16-byte UUID never equals its 36-character text form.
 
+## Converting pre-1.0 columns
+
+Converting existing columns is optional. On MySQL 8, include the helpers in a migration:
+
+```ruby
+class ConvertProjectUuids < ActiveRecord::Migration[7.2]
+  include Uuidable::V1MigrationHelpers
+
+  def change
+    # Every 36-byte column with `uuid` in its name, or only the listed ones:
+    uuidable_migrate_uuid_columns_to_v1 :projects
+    uuidable_migrate_uuid_columns_to_v1 :tasks, { 'project_uuid' => {} }
+  end
+end
+```
+
+The original values stay in `*__old` columns, which models keep writing while they exist, so the migration can be rolled back. When you no longer need that, drop them with `uuidable_drop_all_pre_v1_uuid_columns!`; this cannot be undone.
+
+- Each step is a single `ALTER TABLE`. If the conversion fails, for example on a value that is not a UUID or on two UUIDs that differ only in case under a unique index, the table is left unchanged.
+- Rows written during the conversion are converted too, but adding the converted columns rebuilds the table and blocks writes meanwhile. Restart the application afterwards: running processes keep the old column types.
+- Columns that are part of a primary or foreign key are refused; drop the key first.
+- A rollback is refused if rows changed without the model callbacks, for example with `update_all`, because the `*__old` columns miss those changes. Inserts that skip callbacks, such as `insert_all`, fail while a `NOT NULL` `*__old` column exists.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake spec` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.

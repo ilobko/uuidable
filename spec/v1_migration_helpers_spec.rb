@@ -108,3 +108,157 @@ RSpec.describe Uuidable::V1MigrationHelpers, :mysql do
     end
   end
 end
+
+RSpec.describe Uuidable::V1MigrationHelpers, 'safety', :mysql do
+  include_context 'with a pre-v1 table'
+
+  let(:original_columns) { [['id', 8, false], ['uuid', 36, false], ['reference_uuid', 36, true], ['name', 255, true]] }
+  let(:original_indexes) { { 'conversion_uuid' => [['uuid'], true], 'conversion_reference' => [['reference_uuid'], false] } }
+
+  describe '#uuidable_migrate_uuid_columns_to_v1' do
+    context 'with a column comment and index options' do
+      let(:comment) { connection.columns(:uuidable_conversions).find { |column| column.name == 'uuid' }.comment }
+      let(:index) { connection.indexes(:uuidable_conversions).find { |item| item.name == 'conversion_reference' } }
+
+      before do
+        connection.change_column_comment(:uuidable_conversions, :uuid, 'Public UUID')
+        connection.remove_index(:uuidable_conversions, name: 'conversion_reference')
+        connection.add_index(:uuidable_conversions, %i[reference_uuid name], name: 'conversion_reference',
+                                                                             length: { reference_uuid: 8 }, order: { name: :desc })
+        migration.uuidable_migrate_uuid_columns_to_v1(:uuidable_conversions)
+      end
+
+      it 'keeps the comment' do
+        expect(comment).to eq('Public UUID')
+      end
+
+      it 'keeps the index options' do
+        expect([index.columns, index.lengths, index.orders])
+          .to eq([%w[reference_uuid name], { 'reference_uuid' => 8 }, { 'name' => :desc }])
+      end
+    end
+
+    context 'with an empty options hash for a nullable column' do
+      before { migration.uuidable_migrate_uuid_columns_to_v1(:uuidable_conversions, { 'reference_uuid' => {} }) }
+
+      it 'keeps the column nullable' do
+        expect(columns).to include(['reference_uuid', 16, true])
+      end
+    end
+
+    context 'with UUIDs that differ only in case' do
+      before { connection.execute("INSERT INTO uuidable_conversions (uuid) VALUES ('#{record_uuid.upcase}')") }
+
+      it 'fails without changing the table' do
+        expect { migration.uuidable_migrate_uuid_columns_to_v1(:uuidable_conversions) }.to raise_error(ActiveRecord::RecordNotUnique)
+        expect([columns, indexes]).to eq([original_columns, original_indexes])
+      end
+    end
+
+    ['abc', 'not-a-uuid-and-longer-than-16'].each do |value|
+      context "with #{value.inspect} in a UUID column" do
+        before { connection.execute("UPDATE uuidable_conversions SET reference_uuid = '#{value}' WHERE name = 'second'") }
+
+        it 'fails without changing the table' do
+          expect { migration.uuidable_migrate_uuid_columns_to_v1(:uuidable_conversions) }
+            .to raise_error(ActiveRecord::StatementInvalid, /Incorrect string value/)
+          expect([columns, indexes]).to eq([original_columns, original_indexes])
+        end
+      end
+    end
+
+    context 'with writes during the conversion' do
+      let(:late_uuid) { 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff' }
+
+      before do
+        alters = 0
+        allow(connection).to receive(:execute).and_wrap_original do |execute, sql, *args|
+          alters += 1 if sql.start_with?('ALTER TABLE')
+          if alters == 2 && sql.start_with?('ALTER TABLE')
+            execute.call("INSERT INTO uuidable_conversions (uuid, reference_uuid) VALUES ('#{late_uuid}', '#{record_uuid}')")
+            execute.call("UPDATE uuidable_conversions SET reference_uuid = '#{other_uuid}' WHERE name = 'first'")
+          end
+          execute.call(sql, *args)
+        end
+        migration.uuidable_migrate_uuid_columns_to_v1(:uuidable_conversions)
+      end
+
+      it 'converts them as well' do
+        expect(rows).to eq([[record_uuid, other_uuid], [other_uuid, nil], [late_uuid, record_uuid]])
+      end
+    end
+
+    context 'with a foreign key' do
+      before do
+        connection.create_table(:uuidable_conversion_children) { |t| t.uuid :parent_uuid, limit: 36, index: false }
+        connection.add_foreign_key(:uuidable_conversion_children, :uuidable_conversions, column: :parent_uuid, primary_key: :uuid)
+      end
+
+      after { connection.drop_table(:uuidable_conversion_children) }
+
+      it 'refuses to convert the referenced column' do
+        expect { migration.uuidable_migrate_uuid_columns_to_v1(:uuidable_conversions) }
+          .to raise_error(Uuidable::V1Conversion::Error, /foreign key/)
+        expect(columns).to eq(original_columns)
+      end
+    end
+
+    context 'when a reversible migration is rolled back' do
+      let(:reversible_migration) do
+        Class.new(migration_class) do
+          def change
+            uuidable_migrate_uuid_columns_to_v1(:uuidable_conversions)
+          end
+        end.new
+      end
+
+      before do
+        reversible_migration.migrate(:up)
+        reversible_migration.migrate(:down)
+      end
+
+      it 'restores the original columns' do
+        expect([columns, rows]).to eq([original_columns, [[record_uuid, reference_uuid], [other_uuid, nil]]])
+      end
+    end
+  end
+
+  describe '#uuidable_rollback_uuid_columns_from_v1' do
+    context 'when a row changed without the transition callbacks' do
+      before do
+        migration.uuidable_migrate_uuid_columns_to_v1(:uuidable_conversions)
+        connection.execute("UPDATE uuidable_conversions SET reference_uuid = UUID_TO_BIN('#{other_uuid}') WHERE name = 'first'")
+      end
+
+      it 'refuses to lose the change' do
+        expect { migration.uuidable_rollback_uuid_columns_from_v1(:uuidable_conversions) }
+          .to raise_error(Uuidable::V1Conversion::Error, /1 rows of uuidable_conversions\.reference_uuid differ/)
+        expect(columns.map(&:first)).to include('reference_uuid__old')
+      end
+    end
+
+    context 'with a column that was created with 16 bytes' do
+      before do
+        connection.add_column(:uuidable_conversions, :external_uuid, :binary, limit: 16)
+        migration.uuidable_migrate_uuid_columns_to_v1(:uuidable_conversions)
+        migration.uuidable_rollback_uuid_columns_from_v1(:uuidable_conversions)
+      end
+
+      it 'leaves it alone' do
+        expect(columns).to eq(original_columns + [['external_uuid', 16, true]])
+      end
+    end
+  end
+
+  describe '#uuidable_drop_all_pre_v1_uuid_columns!' do
+    before do
+      connection.add_column(:uuidable_conversions, :notes__old, :string)
+      migration.uuidable_migrate_uuid_columns_to_v1(:uuidable_conversions)
+      migration.uuidable_drop_all_pre_v1_uuid_columns!
+    end
+
+    it 'keeps columns that are not UUIDs' do
+      expect(columns.map(&:first)).to eq(%w[id uuid reference_uuid name notes__old])
+    end
+  end
+end
