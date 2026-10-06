@@ -50,6 +50,11 @@ end
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake spec` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
 
+Specs that need a database are skipped unless `UUIDABLE_DATABASE_URL` points to a MySQL 8 database whose name ends in `_test`. The specs create and drop their own tables. To run them against a specific Active Record version:
+
+    BUNDLE_GEMFILE=gemfiles/activerecord.gemfile ACTIVE_RECORD_VERSION='~> 8.1.0' \
+      UUIDABLE_DATABASE_URL=mysql2://root@127.0.0.1:3306/uuidable_test bundle exec rake
+
 To install this gem onto your local machine, run `bundle exec rake install`. To release a new version, update the version number in `version.rb`, and then run `bundle exec rake release`, which will create a git tag for the version, push git commits and tags, and push the `.gem` file to [rubygems.org](https://rubygems.org).
 
 ## Contributing

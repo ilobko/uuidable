@@ -8,3 +8,4 @@
 /tmp/
 /.history/
 .idea
+/gemfiles/*.lock

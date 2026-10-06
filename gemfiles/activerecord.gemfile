@@ -1,0 +1,8 @@
+# frozen_string_literal: true
+
+# Runs the suite against one Active Record version and a MySQL database:
+#   BUNDLE_GEMFILE=gemfiles/activerecord.gemfile ACTIVE_RECORD_VERSION='~> 8.1.0' bundle exec rake
+eval_gemfile File.expand_path('../Gemfile', __dir__)
+
+gem 'activerecord', ENV.fetch('ACTIVE_RECORD_VERSION')
+gem 'mysql2', '~> 0.5'

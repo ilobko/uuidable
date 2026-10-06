@@ -1,7 +1,5 @@
 # frozen_string_literal: true
 
-require 'logger'
-require 'active_record'
 require 'spec_helper'
 
 RSpec.shared_examples 'UUID column names' do |method, column_method, table_args|
