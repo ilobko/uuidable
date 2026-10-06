@@ -17,24 +17,48 @@ module Uuidable
       end
     end
 
+    # Reads 16-byte UUID columns as UUID strings. The types are installed when the
+    # model loads its schema, so defining a model needs no database connection.
+    module SchemaTypes
+      # Rails 7.2 started asking the model for the type of each column.
+      def self.type_for_column_hook?
+        ::ActiveRecord::ModelSchema::ClassMethods.private_method_defined?(:type_for_column)
+      end
+
+      private
+
+      def load_schema!
+        super
+        install_uuid_types unless SchemaTypes.type_for_column_hook?
+        include V1ModelMigration if columns_hash.each_key.any? { |name| name.include?(V1MigrationHelpers::OLD_POSTFIX) }
+      end
+
+      def type_for_column(connection, column)
+        uuid_column?(connection, column) ? MySQLBinUUID::Type.new : super
+      end
+
+      # Before Rails 7.2: replace the schema types, keeping types declared with `attribute`.
+      def install_uuid_types
+        columns_hash.each_value do |column|
+          next if !uuid_column?(connection, column) || attributes_to_define_after_schema_loads.key?(column.name)
+
+          define_attribute(column.name, MySQLBinUUID::Type.new, default: column.default, user_provided_default: false)
+        end
+      end
+
+      def uuid_column?(connection, column)
+        column.type == :binary && column.limit == 16 && column.name.include?('uuid') &&
+          connection.adapter_name.downcase.include?('mysql')
+      end
+    end
+
     # ClassMethods
     module ClassMethods
       include Finder
 
-      def uuidable(as_param: true) # rubocop:disable Metrics/AbcSize, Metrics/CyclomaticComplexity, Metrics/PerceivedComplexity
-        # Configure all uuid columns for MySQL. Database may not be connected (i.e. on assets precompile), so we must supress errors.
-        conn_config = respond_to?(:connection_db_config) ? connection_db_config.configuration_hash : connection_config
-
-        if conn_config[:adapter].include?('mysql') && connection.data_source_exists?(table_name)
-          begin
-            columns.select { |c| c.type == :binary && c.limit == 16 && c.name.include?('uuid') }.each do |column|
-              attribute column.name.to_sym, MySQLBinUUID::Type.new
-            end
-
-            include V1ModelMigration if columns.any? { |c| c.name.include?(V1MigrationHelpers::OLD_POSTFIX) }
-          rescue ::ActiveRecord::ConnectionNotEstablished, Mysql2::Error::ConnectionError, ::ActiveRecord::NoDatabaseError # rubocop:disable Lint/SuppressedException
-          end
-        end
+      def uuidable(as_param: true) # rubocop:disable Metrics/AbcSize, Metrics/PerceivedComplexity
+        singleton_class.prepend(SchemaTypes) unless singleton_class.include?(SchemaTypes)
+        reload_schema_from_cache if schema_loaded?
 
         after_initialize do
           self.uuid = Uuidable.generate_uuid if attributes.keys.include?('uuid') && uuid.blank?

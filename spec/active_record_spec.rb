@@ -139,3 +139,59 @@ RSpec.describe Uuidable::ActiveRecord, :mysql do
     end
   end
 end
+
+RSpec.describe Uuidable::ActiveRecord, '.uuidable', :mysql do
+  let(:connection) { ActiveRecord::Base.connection }
+  let(:known_uuid) { '01234567-89ab-4cde-8fab-0123456789ab' }
+
+  after do
+    remove_models('UuidableEarlyRecord', 'UuidableUnreachableRecord', 'UuidableTypedRecord')
+    connection.drop_table(:uuidable_late_records, if_exists: true)
+  end
+
+  context 'when the model is defined before its table exists' do
+    subject(:record) { UuidableEarlyRecord.create!(uuid: known_uuid).reload }
+
+    before do
+      define_model('UuidableEarlyRecord', 'uuidable_late_records') { uuidable }
+      connection.create_table(:uuidable_late_records, &:uuid)
+    end
+
+    it 'reads the binary UUID as a string' do
+      expect(record.uuid).to eq(known_uuid)
+    end
+  end
+
+  context 'when the database is unreachable' do
+    subject(:definition) do
+      lambda do
+        define_model('UuidableUnreachableRecord', 'uuidable_unreachable_records') do
+          establish_connection(adapter: 'mysql2', host: '127.0.0.1', port: 1, database: 'uuidable_unreachable_test')
+          uuidable
+        end
+      end
+    end
+
+    after { UuidableUnreachableRecord.remove_connection if Object.const_defined?(:UuidableUnreachableRecord) }
+
+    it 'still defines the model' do
+      expect(&definition).not_to raise_error
+    end
+  end
+
+  context 'when the model declares its own type for a UUID column' do
+    subject(:type) { UuidableTypedRecord.type_for_attribute('uuid') }
+
+    before do
+      connection.create_table(:uuidable_late_records, &:uuid)
+      define_model('UuidableTypedRecord', 'uuidable_late_records') do
+        uuidable
+        attribute :uuid, ActiveModel::Type::Binary.new
+      end
+    end
+
+    it 'keeps the declared type' do
+      expect(type).to be_an_instance_of(ActiveModel::Type::Binary)
+    end
+  end
+end
