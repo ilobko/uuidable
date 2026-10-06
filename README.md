@@ -46,6 +46,26 @@ class CreateProjects < ActiveRecord::Migration
 end
 ```
 
+## UUID storage
+
+New UUID columns store 16 bytes (`varbinary(16)`). Versions before 1.0 stored the 36-character text form (`varbinary(36)`). Models read both as UUID strings (16-byte columns are recognized by `uuid` in their name), and upgrading the gem does not change existing columns.
+
+Choose the format of a new column with `storage:`:
+
+```ruby
+t.uuid storage: :text
+add_uuid_column :projects, :parent_uuid, storage: :binary
+```
+
+An app that keeps its pre-1.0 columns can make text the default, so that new columns match the existing ones:
+
+```ruby
+# config/initializers/uuidable.rb
+Uuidable.default_storage = :text
+```
+
+Columns compared in SQL, for example in a join, must use the same storage: a 16-byte UUID never equals its 36-character text form.
+
 ## Development
 
 After checking out the repo, run `bin/setup` to install dependencies. Then, run `rake spec` to run the tests. You can also run `bin/console` for an interactive prompt that will allow you to experiment.
